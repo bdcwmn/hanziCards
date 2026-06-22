@@ -145,6 +145,15 @@
   .pinyinwrap{min-height:clamp(32px,5vh,42px);display:grid;place-items:center;margin-top:clamp(4px,1.2vh,10px);}
   .pinyinwrap .pinyin{margin-top:0;}
   .pts{color:var(--jade);font-weight:700;font-variant-numeric:tabular-nums;}
+  .spk{position:absolute;top:14px;left:14px;width:44px;height:44px;border-radius:50%;z-index:3;
+    display:grid;place-items:center;cursor:pointer;background:var(--paper);color:var(--seal-deep);
+    border:1.5px solid var(--paper-edge);box-shadow:0 2px 6px rgba(0,0,0,.14);
+    transition:transform .06s, background .15s, color .15s;}
+  .spk:active{transform:scale(.92);}
+  .spk svg{width:22px;height:22px;}
+  .spk.playing{background:var(--seal);color:#fff;border-color:var(--seal);}
+  .spk.sm{position:static;display:inline-grid;width:30px;height:30px;vertical-align:middle;box-shadow:none;}
+  .spk.sm svg{width:16px;height:16px;}
   .hanzi{font-family:var(--hanzi);text-align:center;font-size:clamp(46px,min(15vw,13vh),108px);
     line-height:1;color:var(--char-ink);font-weight:500;}
   .pinyin{text-align:center;font-size:clamp(18px,4.4vw,28px);color:var(--seal-deep);
@@ -949,7 +958,7 @@ let selected={1:true,2:true,3:true};
 let direction='c2e';   // 'c2e' | 'e2c' | 'mix'
 let mode='mc';         // 'mc'  | 'flip'
 let pool=[], current=null, curDir='c2e', lastId=null;
-let answered=false, revealed=false, streak=0, score=0;
+let answered=false, revealed=false, streak=0, score=0, audioUsed=false;
 let pinyinPref='hidden', picturePref='hidden';   // global defaults chosen on home
 let pinyinShown=false, pictureShown=false;        // per-card reveal state
 
@@ -983,6 +992,26 @@ function simpLine(e){ return e.s!==e.t ? `simplified <span>${e.s}</span>` : ''; 
 const stampEl = `<div class="stamp">對</div>`;
 const HINT_ICON = `<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.6"/><path d="M21 15l-5-5L5 20"/></svg>`;
 const SOUND_ICON = `<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path d="M16 8.5a4 4 0 0 1 0 7"/></svg>`;
+const SPEAKER_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9v6h4l5 4V5L9 9H5z"/><path d="M16 8.5a4 4 0 0 1 0 7"/><path d="M18.6 6a8 8 0 0 1 0 12"/></svg>`;
+const AUDIO_OK = ('speechSynthesis' in window) && ('SpeechSynthesisUtterance' in window);
+let zhVoice=null;
+function pickVoice(){
+  try{ const vs=speechSynthesis.getVoices()||[];
+    zhVoice = vs.find(v=>/^zh(-|_|$)/i.test(v.lang||'')) || vs.find(v=>(v.lang||'').toLowerCase().startsWith('zh')) || null;
+  }catch(e){}
+}
+if(AUDIO_OK){ pickVoice(); try{ speechSynthesis.onvoiceschanged=pickVoice; }catch(e){} }
+function speak(text, btn){
+  if(!AUDIO_OK) return;
+  try{
+    speechSynthesis.cancel();
+    const u=new SpeechSynthesisUtterance(text);
+    u.lang=(zhVoice&&zhVoice.lang)||'zh-CN'; if(zhVoice) u.voice=zhVoice; u.rate=0.9;
+    if(btn){ btn.classList.add('playing'); u.onend=u.onerror=()=>btn.classList.remove('playing'); }
+    speechSynthesis.speak(u);
+  }catch(e){}
+}
+function speakerBtn(id, extra){ return AUDIO_OK ? `<button class="spk${extra||''}" id="${id}" type="button" aria-label="Play audio">${SPEAKER_ICON}</button>` : ''; }
 // Picture: shown directly when revealed (button or global default), else a Hint button — only if the word has art.
 function artSlot(e){
   if(!ART[e.a]) return '';
@@ -999,7 +1028,7 @@ function pinyinSlot(e){
 
 function faceFront(e, dir){
   if(dir==='c2e'){
-    return `${stampEl}
+    return `${stampEl}${speakerBtn('spkFront')}
       ${artSlot(e)}
       <div class="hanzi">${e.t}</div>
       ${pinyinSlot(e)}
@@ -1015,7 +1044,7 @@ function faceBack(e, dir){
       <div class="answer-en">${e.e}</div>
       <div class="answer-sub"><span class="zh">${e.t}</span> · ${e.p}</div>`;
   }
-  return `${stampEl}
+  return `${stampEl}${speakerBtn('spkBack')}
     <div class="hanzi">${e.t}</div>
     <div class="pinyin">${e.p}</div>
     <div class="simp">${simpLine(e)}</div>`;
@@ -1043,6 +1072,7 @@ function showCard(){
   // per-card reveal state starts from the global defaults chosen on the home screen
   pinyinShown = (pinyinPref==='shown');
   pictureShown = (picturePref==='shown');
+  audioUsed = false;
 
   frontFace.innerHTML = faceFront(current, curDir);
   backFace.innerHTML  = faceBack(current, curDir);
@@ -1061,6 +1091,11 @@ function showCard(){
     pinyinShown = true;
     const wrap = pyh.closest('.pinyinwrap'); if(wrap) wrap.innerHTML = `<div class="pinyin">${current.p}</div>`;
   });
+  // Audio (tap-to-hear). Front speaker (漢→EN) counts as a pronunciation hint; the answer-side speaker is free.
+  const spkF = frontFace.querySelector('#spkFront');
+  if(spkF) spkF.addEventListener('click', ev=>{ ev.stopPropagation(); audioUsed=true; speak(current.t, spkF); });
+  const spkB = backFace.querySelector('#spkBack');
+  if(spkB) spkB.addEventListener('click', ev=>{ ev.stopPropagation(); speak(current.t, spkB); });
 
   // reset flip without animating the reset
   flipInner.style.transition='none';
@@ -1101,13 +1136,18 @@ function buildChoices(){
 const SCORE_BASE=100, SCORE_PEN=40, SCORE_MIN=20;
 function hintsUsed(){
   if(curDir!=='c2e') return 0;            // hints only aid the 漢→EN task (recalling meaning)
-  return (pinyinShown?1:0) + (ART[current.a] && pictureShown ? 1 : 0);
+  const pron = (pinyinShown || audioUsed) ? 1 : 0;   // pinyin OR audio = one pronunciation hint
+  return pron + (ART[current.a] && pictureShown ? 1 : 0);
 }
 function awardPoints(){
   const pts=Math.max(SCORE_MIN, SCORE_BASE - SCORE_PEN*hintsUsed());
   score+=pts; $('score').textContent=score; return pts;
 }
 
+function wireMsgSpeaker(){
+  const b=$('msg').querySelector('#msgSpk');
+  if(b) b.addEventListener('click', ()=>speak(current.t, b));
+}
 function chooseMC(btn){
   if(answered) return; answered=true;
   const ok = btn._entry===current;
@@ -1121,13 +1161,22 @@ function chooseMC(btn){
   });
   if(ok){
     streak++; stampFace(frontFace);
-    $('msg').innerHTML=`<b>對</b> Correct <span class="pts">+${awardPoints()}</span>`;
-    setTimeout(()=>{ if(answered) showCard(); }, 950);
+    const pts=awardPoints();
+    if(curDir==='e2c'){
+      $('msg').innerHTML=`<b>對</b> <span class="pts">+${pts}</span> &nbsp; <span class="zh">${current.t}</span> · ${current.p} ${speakerBtn('msgSpk',' sm')}`;
+      wireMsgSpeaker(); $('goBtn').classList.remove('hidden');
+    }else{
+      $('msg').innerHTML=`<b>對</b> Correct <span class="pts">+${pts}</span>`;
+      setTimeout(()=>{ if(answered) showCard(); }, 950);
+    }
   }else{
     streak=0;
-    $('msg').innerHTML = curDir==='c2e'
-      ? `<b>${current.t}</b> = ${current.e}`
-      : `<b>${current.t}</b> · ${current.p} = ${current.e}`;
+    if(curDir==='c2e'){
+      $('msg').innerHTML=`<b>${current.t}</b> = ${current.e}`;
+    }else{
+      $('msg').innerHTML=`<b>${current.t}</b> · ${current.p} = ${current.e} ${speakerBtn('msgSpk',' sm')}`;
+      wireMsgSpeaker();
+    }
     $('goBtn').classList.remove('hidden');
   }
   $('streak').textContent=streak;
